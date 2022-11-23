@@ -11,7 +11,6 @@
 #define pr_fmt(fmt) "OPEMU: " fmt
 
 #include <linux/ftrace.h>
-#include <linux/kallsyms.h>
 #include <linux/kernel.h>
 #include <linux/linkage.h>
 #include <linux/module.h>
@@ -29,6 +28,16 @@ MODULE_LICENSE("GPL");
 
 #if defined(CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
 #define PTREGS_SYSCALL_STUBS 1
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
+#define KPROBE_LOOKUP 1
+#include <linux/kprobes.h>
+static struct kprobe kp = {
+    .symbol_name = "kallsyms_lookup_name"
+};
+typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
+kallsyms_lookup_name_t my_kallsyms_lookup_name;
 #endif
 
 /**
@@ -59,7 +68,7 @@ struct ftrace_hook {
 
 static int fh_resolve_hook_address(struct ftrace_hook *hook)
 {
-    hook->address = kallsyms_lookup_name(hook->name);
+    hook->address = my_kallsyms_lookup_name(hook->name);
 
     if (!hook->address) {
         pr_debug("unresolved symbol: %s\n", hook->name);
@@ -76,15 +85,15 @@ static int fh_resolve_hook_address(struct ftrace_hook *hook)
 }
 
 static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
-        struct ftrace_ops *ops, struct pt_regs *regs)
+        struct ftrace_ops *ops, struct ftrace_regs *regs)
 {
     struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
 
 #if USE_FENTRY_OFFSET
-    regs->ip = (unsigned long) hook->function;
+    regs->regs.ip = (unsigned long) hook->function;
 #else
     if (!within_module(parent_ip, THIS_MODULE))
-        regs->ip = (unsigned long) hook->function;
+        regs->regs.ip = (unsigned long) hook->function;
 #endif
 }
 
@@ -110,7 +119,7 @@ int fh_install_hook(struct ftrace_hook *hook)
      */
     hook->ops.func = fh_ftrace_thunk;
     hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
-                    | FTRACE_OPS_FL_RECURSION_SAFE
+                    | FTRACE_OPS_FL_RECURSION
                     | FTRACE_OPS_FL_IPMODIFY;
 
     err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
@@ -259,7 +268,13 @@ static struct ftrace_hook demo_hooks[] = {
 static int fh_init(void)
 {
     int err;
-    
+
+#ifdef KPROBE_LOOKUP
+    register_kprobe(&kp);
+    my_kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+    unregister_kprobe(&kp);
+#endif    
+
     err = fh_install_hooks(demo_hooks, ARRAY_SIZE(demo_hooks));
     if (err)
         return err;
